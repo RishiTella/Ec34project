@@ -1,3 +1,5 @@
+import pandas as pd
+
 def load(path, year):
     df = pd.read_csv(path, usecols=lambda c: c in keep_cols)
     df = df[df["CREDLEV"] == 3].reset_index(drop=True)
@@ -5,6 +7,24 @@ def load(path, year):
     df = df[df["IPEDSCOUNT1"] >= 9].reset_index(drop=True)
     df["YEAR"] = year
     return df
+
+keep_cols = [
+    # IDs (4)
+    "UNITID", "OPEID6", "INSTNM", "CONTROL",
+    # Program metadata (7)
+    "MAIN", "CIPCODE", "CIPDESC", "CREDLEV", "CREDDESC",
+    "IPEDSCOUNT1", "IPEDSCOUNT2",
+    # Earnings HI 1YR / 2YR (8)
+    "EARN_COUNT_NWNE_HI_1YR", "EARN_COUNT_WNE_HI_1YR",
+    "EARN_MDN_HI_1YR", "EARN_CNTOVER150_HI_1YR",
+    "EARN_COUNT_NWNE_HI_2YR", "EARN_COUNT_WNE_HI_2YR",
+    "EARN_MDN_HI_2YR", "EARN_CNTOVER150_HI_2YR",
+    # Other earnings (7)
+    "EARN_CNTOVER150_3YR",
+    "EARN_COUNT_NWNE_1YR", "EARN_MDN_1YR",
+    "EARN_COUNT_NWNE_4YR", "EARN_MDN_4YR",
+    "EARN_COUNT_NWNE_5YR", "EARN_GT_THRESHOLD_5YR",
+]
 
 base = "/Users/rishi/Desktop/College_Scorecard_Raw_Data_03232026/"
 files = [
