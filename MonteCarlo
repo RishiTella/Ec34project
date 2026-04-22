@@ -1,0 +1,285 @@
+"""
+Monte Carlo Simulation: Bias from Lumping Cohorts and Taking Medians
+====================================================================
+Calibrated to College Scorecard field-of-study data.
+
+Data structure: each row is a school × major cell, pooling 2 adjacent
+graduation cohorts (e.g., 2021-22 and 2022-23). The reported median
+earnings is taken over the pooled group. Question: does this introduce
+bias in OLS estimates of major earnings premiums vs. having clean
+single-cohort medians?
+
+Calibration source: Cell_output_2__DW_.csv
+  - ~2,700 schools, ~350 majors (we simulate a representative subset)
+  - Median 4yr earnings ~ $55,000, SD ~ $20,500
+  - Major premium spread ~ $65,000 (from ~$35k to ~$100k)
+  - School FE SD ~ $12,000
+  - Median cohort size per year ~ 14 students (very small!)
+  - Earnings skewness ~ 1.2 (right-skewed, mean/median ratio ~ 1.11)
+  - Year-over-year earnings growth ~ $2,000 (from YEAR window medians)
+"""
+
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+np.random.seed(42)
+
+# =============================================================================
+# 1. SIMULATION PARAMETERS — CALIBRATED TO DATA
+# =============================================================================
+
+N_SIMULATIONS = 2000
+
+# Structure (use a subset to keep runtime manageable)
+N_SCHOOLS = 200        # actual data has ~2,700; subset for speed
+N_MAJORS = 20          # actual data has ~350; subset for speed
+N_YEARS = 2            # two cohorts lumped per row
+
+# Earnings DGP — calibrated to EARN_MDN_4YR
+BASE_EARNINGS = 55000  # overall median ~ $55,308
+
+# True major premiums relative to baseline major (major 0)
+# Spread calibrated to data: ~$35k (drama) to ~$100k (CS/engineering)
+# SD of major-level medians ~ $15,500
+# We create 20 majors spanning the real range
+TRUE_MAJOR_EFFECTS = np.array([
+    0,        # Major 0: baseline (~$55k, e.g. "average" major)
+    -19000,   # Drama/Theatre (~$35k)
+    -17000,   # Fine Arts (~$38k)
+    -15000,   # Music (~$40k)
+    -13000,   # Film/Video (~$40k)
+    -10000,   # Anthropology (~$42k)
+    -5000,    # Psychology (~$48k)
+    -2000,    # English (~$52k)
+     3000,    # Biology (~$57k)
+     5000,    # Political Science (~$59k)
+     8000,    # Marketing (~$62k)
+    10000,    # Accounting (~$64k)
+    15000,    # Finance (~$69k)
+    20000,    # Information Systems (~$74k)
+    25000,    # Nursing (~$79k)
+    27000,    # Civil Engineering (~$82k)
+    33000,    # Mechanical Engineering (~$87k)
+    37000,    # Chemical Engineering (~$92k)
+    40000,    # Computer Science (~$96k)
+    45000,    # Computer Engineering (~$100k)
+])
+
+# School fixed effects — SD calibrated to $12,000 from data
+SCHOOL_FE_SD = 12000
+SCHOOL_FES = np.random.normal(0, SCHOOL_FE_SD, N_SCHOOLS)
+
+# Cohort size per school × major × year
+# Data: median pooled count = 28, so per-year ~ 14
+# Very right-skewed: mean ~ 29, but median ~ 14
+# We draw from a lognormal to match this skew
+COHORT_SIZE_MEDIAN = 14
+COHORT_SIZE_SIGMA = 0.8  # controls skew of cohort sizes
+
+# Year effect: ~$2,000 growth between adjacent cohorts
+YEAR_EFFECT = 2000
+
+# Earnings noise
+# Lognormal with skewness ~ 1.2, mean/median ratio ~ 1.11
+# sigma_ln calibrated so individual earnings have realistic spread
+SIGMA_LN = 0.45  # controls right-skew (data shows skewness ~ 1.2)
+
+
+# =============================================================================
+# 2. SIMULATION FUNCTION
+# =============================================================================
+
+def simulate_once():
+    """
+    Generate individual-level earnings, then compute:
+      1. Clean medians: median earnings for each school × major × year
+      2. Lumped medians: pool both years, take one median per school × major
+
+    Run OLS of median earnings on major dummies + school FEs.
+    Return the estimated major coefficients.
+    """
+
+    rows = []
+
+    for s in range(N_SCHOOLS):
+        for m in range(N_MAJORS):
+            for y in range(N_YEARS):
+                # Cohort size: lognormal to match the skewed distribution
+                # median of lognormal = exp(mu_ln), so mu_ln = ln(14)
+                mu_cs = np.log(COHORT_SIZE_MEDIAN)
+                n_students = max(5, int(np.random.lognormal(mu_cs, COHORT_SIZE_SIGMA)))
+
+                # True conditional mean for this cell
+                mu = BASE_EARNINGS + SCHOOL_FES[s] + TRUE_MAJOR_EFFECTS[m] + YEAR_EFFECT * y
+
+                # Lognormal individual earnings
+                # Set so that median(earnings) = mu
+                # For lognormal: median = exp(mu_ln), so mu_ln = ln(mu)
+                mu_ln = np.log(max(mu, 5000))  # floor to avoid log of negative
+                earnings = np.random.lognormal(mu_ln, SIGMA_LN, n_students)
+
+                for e in earnings:
+                    rows.append({
+                        'school': s,
+                        'major': m,
+                        'year': y,
+                        'earnings': e
+                    })
+
+    df = pd.DataFrame(rows)
+
+    # ----- Clean version: median by school × major × year -----
+    clean = df.groupby(['school', 'major', 'year'])['earnings'].median().reset_index()
+    clean.rename(columns={'earnings': 'med_earnings'}, inplace=True)
+
+    # ----- Lumped version: pool years, then take median by school × major -----
+    lumped = df.groupby(['school', 'major'])['earnings'].median().reset_index()
+    lumped.rename(columns={'earnings': 'med_earnings'}, inplace=True)
+
+    # ----- Run regressions -----
+    def run_regression(data):
+        major_dummies = pd.get_dummies(data['major'], prefix='major', drop_first=True, dtype=float)
+        school_dummies = pd.get_dummies(data['school'], prefix='school', drop_first=True, dtype=float)
+        X = pd.concat([major_dummies, school_dummies], axis=1)
+        X = sm.add_constant(X)
+        y = data['med_earnings']
+        model = sm.OLS(y, X).fit()
+
+        # Extract major coefficients
+        major_cols = [c for c in X.columns if c.startswith('major_')]
+        beta_hat = model.params[major_cols].values
+        return beta_hat
+
+    beta_clean = run_regression(clean)
+    beta_lumped = run_regression(lumped)
+
+    return beta_clean, beta_lumped
+
+
+# =============================================================================
+# 3. RUN THE MONTE CARLO
+# =============================================================================
+
+print(f"Running {N_SIMULATIONS} simulations...")
+print(f"  {N_SCHOOLS} schools × {N_MAJORS} majors × {N_YEARS} years")
+print(f"  Cohort size median: {COHORT_SIZE_MEDIAN} students/year")
+print(f"  Year effect: ${YEAR_EFFECT:,}")
+print(f"  Lognormal σ: {SIGMA_LN} (skewness ~ 1.2)")
+print(f"  School FE SD: ${SCHOOL_FE_SD:,}")
+print()
+
+results_clean = []
+results_lumped = []
+
+for i in tqdm(range(N_SIMULATIONS)):
+    bc, bl = simulate_once()
+    results_clean.append(bc)
+    results_lumped.append(bl)
+
+results_clean = np.array(results_clean)   # shape: (N_SIMULATIONS, N_MAJORS - 1)
+results_lumped = np.array(results_lumped)
+
+# True effects (dropping major 0 baseline)
+true_betas = TRUE_MAJOR_EFFECTS[1:]
+major_labels = [
+    "Drama", "Fine Arts", "Music", "Film", "Anthro",
+    "Psych", "English", "Biology", "PoliSci", "Marketing",
+    "Accounting", "Finance", "InfoSys", "Nursing", "CivE",
+    "MechE", "ChemE", "CS", "CompE"
+]
+
+
+# =============================================================================
+# 4. RESULTS TABLE
+# =============================================================================
+
+print("=" * 80)
+print("RESULTS: Mean estimated coefficients across simulations")
+print("=" * 80)
+print(f"{'Major':<12} {'True β':>10} {'Clean β̂':>12} {'Lumped β̂':>12} {'Bias':>10} {'Bias %':>10}")
+print("-" * 80)
+
+for j in range(len(true_betas)):
+    true_b = true_betas[j]
+    mean_clean = results_clean[:, j].mean()
+    mean_lumped = results_lumped[:, j].mean()
+    bias = mean_lumped - true_b
+    bias_pct = (bias / abs(true_b) * 100) if true_b != 0 else np.nan
+    print(f"{major_labels[j]:<12} {true_b:>10,} {mean_clean:>12,.0f} {mean_lumped:>12,.0f} {bias:>10,.0f} {bias_pct:>9.1f}%")
+
+print()
+overall_bias = results_lumped.mean(axis=0) - true_betas
+print(f"Mean absolute bias across majors: ${np.abs(overall_bias).mean():,.0f}")
+print(f"Mean signed bias:                 ${overall_bias.mean():,.0f}")
+print(f"Max absolute bias:                ${np.abs(overall_bias).max():,.0f}")
+
+# Variance comparison
+print()
+print("=" * 80)
+print("VARIANCE: SD of β̂ across simulations")
+print("=" * 80)
+print(f"{'Major':<12} {'SD Clean':>12} {'SD Lumped':>12} {'Ratio':>10}")
+print("-" * 50)
+for j in range(len(true_betas)):
+    sd_c = results_clean[:, j].std()
+    sd_l = results_lumped[:, j].std()
+    print(f"{major_labels[j]:<12} {sd_c:>12,.0f} {sd_l:>12,.0f} {sd_l/sd_c:>10.3f}")
+
+
+# =============================================================================
+# 5. PLOTS
+# =============================================================================
+
+# --- Plot 1: Histograms for selected majors ---
+selected = [0, 4, 8, 12, 17, 18]  # Drama, Anthro, PoliSci, InfoSys, CS, CompE
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+fig.suptitle(
+    "Monte Carlo: Clean vs Lumped Median Estimator\n"
+    f"({N_SIMULATIONS} sims, {N_SCHOOLS} schools × {N_MAJORS} majors, "
+    f"cohort~{COHORT_SIZE_MEDIAN}/yr, σ_ln={SIGMA_LN})",
+    fontsize=13, fontweight='bold'
+)
+
+for idx, ax in enumerate(axes.flat):
+    j = selected[idx]
+    ax.hist(results_clean[:, j], bins=50, alpha=0.5, label='Clean', density=True, color='steelblue')
+    ax.hist(results_lumped[:, j], bins=50, alpha=0.5, label='Lumped', density=True, color='coral')
+    ax.axvline(true_betas[j], color='black', linestyle='--', linewidth=2, label=f'True β = ${true_betas[j]:,}')
+    ax.axvline(results_lumped[:, j].mean(), color='coral', linestyle=':', linewidth=1.5,
+               label=f'Lumped mean = ${results_lumped[:, j].mean():,.0f}')
+    ax.set_title(major_labels[j], fontsize=12)
+    ax.legend(fontsize=8)
+    ax.set_xlabel('Estimated β')
+
+plt.tight_layout()
+plt.savefig('monte_carlo_histograms.png', dpi=150, bbox_inches='tight')
+plt.close()
+
+# --- Plot 2: Bias summary across all majors ---
+fig, ax = plt.subplots(figsize=(12, 6))
+
+mean_clean = results_clean.mean(axis=0)
+mean_lumped = results_lumped.mean(axis=0)
+
+x = np.arange(len(true_betas))
+width = 0.25
+
+ax.bar(x - width, true_betas, width, label='True β', color='black', alpha=0.7)
+ax.bar(x, mean_clean, width, label='Clean β̂ (mean)', color='steelblue', alpha=0.7)
+ax.bar(x + width, mean_lumped, width, label='Lumped β̂ (mean)', color='coral', alpha=0.7)
+
+ax.set_xticks(x)
+ax.set_xticklabels(major_labels, rotation=45, ha='right', fontsize=9)
+ax.set_ylabel('Coefficient ($)', fontsize=11)
+ax.set_title('True vs Estimated Major Premiums: Clean vs Lumped', fontsize=13, fontweight='bold')
+ax.legend()
+ax.axhline(0, color='gray', linewidth=0.5)
+
+plt.tight_layout()
+plt.savefig('monte_carlo_bias_summary.png', dpi=150, bbox_inches='tight')
+plt.close()
+
+print("\nPlots saved: monte_carlo_histograms.png, monte_carlo_bias_summary.png")
