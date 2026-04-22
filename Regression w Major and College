@@ -1,0 +1,76 @@
+import statsmodels.api as sm
+
+# Convert to numeric
+paneltrimmed["EARN_MDN_4YR"] = pd.to_numeric(paneltrimmed["EARN_MDN_4YR"], errors="coerce")
+paneltrimmed["IPEDSCOUNT2"] = pd.to_numeric(paneltrimmed["IPEDSCOUNT2"], errors="coerce")
+
+# Row-level weight
+paneltrimmed["n_row"] = paneltrimmed["IPEDSCOUNT1"].fillna(0) + paneltrimmed["IPEDSCOUNT2"].fillna(0)
+
+# Drop rows missing the outcome
+reg_df = paneltrimmed.dropna(subset=["EARN_MDN_4YR"]).copy()
+
+# Create dummies for both CIPDESC and INSTNM
+X_cip = pd.get_dummies(reg_df["CIPDESC"], drop_first=True, prefix="CIP").astype(float)
+X_inst = pd.get_dummies(reg_df["INSTNM"], drop_first=True, prefix="INST").astype(float)
+X = pd.concat([X_cip, X_inst], axis=1)
+X = sm.add_constant(X)
+y = reg_df["EARN_MDN_4YR"]
+
+# Run OLS
+model = sm.OLS(y, X).fit()
+
+# --- CIPDESC summary ---
+cip_cols = [c for c in X.columns if c.startswith("CIP_")]
+coefs_cip = model.params[cip_cols].rename(lambda c: c.replace("CIP_", ""))
+ses_cip = model.bse[cip_cols].rename(lambda c: c.replace("CIP_", ""))
+pvals_cip = model.pvalues[cip_cols].rename(lambda c: c.replace("CIP_", ""))
+total_n_cip = reg_df.groupby("CIPDESC")["n_row"].sum()
+
+sum_cip = pd.DataFrame({"beta": coefs_cip, "se": ses_cip, "pval": pvals_cip})
+sum_cip = sum_cip.join(total_n_cip.rename("n"), how="left").sort_values("beta", ascending=False)
+
+# --- INSTNM summary ---
+inst_cols = [c for c in X.columns if c.startswith("INST_")]
+coefs_inst = model.params[inst_cols].rename(lambda c: c.replace("INST_", ""))
+ses_inst = model.bse[inst_cols].rename(lambda c: c.replace("INST_", ""))
+pvals_inst = model.pvalues[inst_cols].rename(lambda c: c.replace("INST_", ""))
+total_n_inst = reg_df.groupby("INSTNM")["n_row"].sum()
+
+sum_inst = pd.DataFrame({"beta": coefs_inst, "se": ses_inst, "pval": pvals_inst})
+sum_inst = sum_inst.join(total_n_inst.rename("n"), how="left").sort_values("beta", ascending=False)
+
+# Print header
+intercept = model.params["const"]
+print(f"N = {len(reg_df):,},  R² = {model.rsquared:.4f}")
+print(f"Reference group (Intercept): ${intercept:,.0f}")
+
+# Top/Bottom 10 by CIPDESC
+print("\n" + "=" * 70)
+print(" TOP 10 HIGHEST-EARNING FIELDS (relative to reference)")
+print("=" * 70)
+print(f"{'':60s} {'beta':>10s} {'se':>10s} {'pval':>5s} {'n':>5s}")
+for idx, row in sum_cip.head(10).iterrows():
+    print(f"{idx:60s} {row['beta']:>10,.2f} {row['se']:>10,.2f} {row['pval']:>5.2f} {int(row['n']):>5d}")
+
+print("\n" + "=" * 70)
+print(" BOTTOM 10 LOWEST-EARNING FIELDS (relative to reference)")
+print("=" * 70)
+print(f"{'':60s} {'beta':>10s} {'se':>10s} {'pval':>5s} {'n':>5s}")
+for idx, row in sum_cip.tail(10).iterrows():
+    print(f"{idx:60s} {row['beta']:>10,.2f} {row['se']:>10,.2f} {row['pval']:>5.2f} {int(row['n']):>5d}")
+
+# Top/Bottom 10 by INSTNM
+print("\n" + "=" * 70)
+print(" TOP 10 HIGHEST-EARNING INSTITUTIONS (relative to reference)")
+print("=" * 70)
+print(f"{'':60s} {'beta':>10s} {'se':>10s} {'pval':>5s} {'n':>5s}")
+for idx, row in sum_inst.head(10).iterrows():
+    print(f"{idx:60s} {row['beta']:>10,.2f} {row['se']:>10,.2f} {row['pval']:>5.2f} {int(row['n']):>5d}")
+
+print("\n" + "=" * 70)
+print(" BOTTOM 10 LOWEST-EARNING INSTITUTIONS (relative to reference)")
+print("=" * 70)
+print(f"{'':60s} {'beta':>10s} {'se':>10s} {'pval':>5s} {'n':>5s}")
+for idx, row in sum_inst.tail(10).iterrows():
+    print(f"{idx:60s} {row['beta']:>10,.2f} {row['se']:>10,.2f} {row['pval']:>5.2f} {int(row['n']):>5d}")
