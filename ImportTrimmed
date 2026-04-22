@@ -1,0 +1,25 @@
+def load(path, year):
+    df = pd.read_csv(path, usecols=lambda c: c in keep_cols)
+    df = df[df["CREDLEV"] == 3].reset_index(drop=True)
+    df["IPEDSCOUNT1"] = pd.to_numeric(df["IPEDSCOUNT1"], errors="coerce")
+    df = df[df["IPEDSCOUNT1"] >= 9].reset_index(drop=True)
+    df["YEAR"] = year
+    return df
+
+base = "/Users/rishi/Desktop/College_Scorecard_Raw_Data_03232026/"
+files = [
+    ("FieldOfStudyData1415_1516_PP.csv", "1415_1516"),
+    ("FieldOfStudyData1516_1617_PP.csv", "1516_1617"),
+    ("FieldOfStudyData1617_1718_PP.csv", "1617_1718"),
+    ("FieldOfStudyData1718_1819_PP.csv", "1718_1819"),
+    ("FieldOfStudyData1819_1920_PP.csv", "1819_1920"),
+    ("FieldOfStudyData1920_2021_PP.csv", "1920_2021"),
+    ("FieldOfStudyData2021_2122_PP.csv", "2021_2122"),
+    ("FieldOfStudyData2122_2223_PP.csv", "2122_2223"),
+]
+paneltrimmed = pd.concat(
+    [load(base + fname, year) for fname, year in files],
+    ignore_index=True,
+)
+print(paneltrimmed.shape)
+print(paneltrimmed["YEAR"].value_counts().sort_index())
